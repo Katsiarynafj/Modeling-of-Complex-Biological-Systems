@@ -1,0 +1,260 @@
+***
+
+```{r setup, include=FALSE}
+all_times <- list()  # store the time for each chunk
+knitr::knit_hooks$set(time_it = local({
+  now <- NULL
+  function(before, options) {
+    if (before) {
+      now <<- Sys.time()
+    } else {
+      res <- difftime(Sys.time(), now, units = "secs")
+      all_times[[options$label]] <<- res
+    }
+  }
+}))
+knitr::opts_chunk$set(
+  tidy = TRUE,
+  tidy.opts = list(width.cutoff = 95),
+  message = FALSE,
+  warning = FALSE,
+  time_it = TRUE
+)
+```
+# Homework
+
+You need to apply the same analysis pipeline to the bigger dataset published in Zheng et al. 2017, specifically called 'Fresh 68k PBMCs (Donor A)'. If you are not familiar, please read the original paper (listed on the syllabus and the website).
+
+Download the following data on 10X Genomics
+https://support.10xgenomics.com/single-cell-gene-expression/datasets
+
+### Single Cell 3' Paper: Zheng et al. 2017
+#### Fresh 68k PBMCs (Donor A)
+
+# Homework Problem 1
+Analyze the 68k PBMCs dataset in the same way as presented in the Seurat's guide with PBMC3k. Apply QC, PCA, jackstraw, clustering, and t-SNE to create figure similar to Figure 3b on Zheng et al. 2017. Note that there are differences between Zheng's original analysis and Seurat's analysis. Pay attentions to hyper-parameters that you must choose for this new bigger dataset.
+
+Provide R markdown file with your codes and outputs.
+
+Present the t-SNE visualization with 10 clusters as defined by K-means clustering
+
+Reproduce Figure 3 but note difference in results: https://www.nature.com/articles/ncomms14049/figures/3
+```{r init}
+library(dplyr)
+library(Seurat)
+library(patchwork)
+library(ggplot2)
+
+# Load the PBMC dataset
+pbmc.data <- Read10X(data.dir = "/home/fuckingjam/modeling/fresh_68k_pbmc_donor_a_filtered_gene_bc_matrices/filtered_matrices_mex/hg19")
+pbmc <- CreateSeuratObject(counts = pbmc.data, project = "pbmc3k", min.cells = 3, min.features = 200)
+pbmc
+
+# The [[ operator can add columns to object metadata. This is a great place to stash QC stats
+pbmc[["percent.mt"]] <- PercentageFeatureSet(pbmc, pattern = "^MT-")
+```
+
+
+```{r qc2, fig.height=7, fig.width=13}
+
+#Visualize QC metrics as a violin plot
+VlnPlot(pbmc, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+
+# FeatureScatter is typically used to visualize feature-feature relationships, but can be used for anything calculated by the object, i.e. columns in object metadata, PC scores etc.
+
+plot1 <- FeatureScatter(pbmc, feature1 = "nCount_RNA", feature2 = "percent.mt") 
+plot2 <- FeatureScatter(pbmc, feature1 = "nCount_RNA", feature2 = "nFeature_RNA") 
+plot1 + plot2
+```
+
+
+```{r}
+pbmc <- subset(pbmc, subset = nFeature_RNA > 200 & nFeature_RNA < 2500 & percent.mt < 5)
+
+pbmc <- NormalizeData(pbmc, normalization.method = "LogNormalize", scale.factor = 1e4)
+
+pbmc_full = pbmc
+
+pbmc_subset <- subset(pbmc_full, cells = sample(colnames(pbmc), 40000))
+
+pbmc_subset <- FindVariableFeatures(pbmc_subset, selection.method = 'vst', nfeatures = 2000)
+
+nrow(pbmc_subset)
+ncol(pbmc_subset)
+
+top10 <- head(VariableFeatures(pbmc_subset), 10)
+
+# plot variable features with and without labels
+plot1 <- VariableFeaturePlot(pbmc_subset)
+plot2 <- LabelPoints(plot = plot1, points = top10, repel = TRUE)
+plot1 + plot2
+
+```
+```{r}
+pbmc_subset <- ScaleData(pbmc_subset, vars.to.regress = 'percent.mt')
+
+ncol(pbmc_subset)
+
+pbmc_subset <- RunPCA(pbmc_subset, features = VariableFeatures(object = pbmc_subset))
+
+```
+Seurat provides several useful ways of visualizing both cells and features that define the PCA, including `VizDimReduction()`, `DimPlot()`, and `DimHeatmap()`
+
+```{r pca_viz, message=TRUE}
+
+# Examine and visualize PCA results a few different ways
+print(pbmc_subset[['pca']], dims = 1:5, nfeatures = 5)
+VizDimLoadings(pbmc_subset, dims = 1:2, reduction = 'pca')
+DimPlot(pbmc_subset, reduction = 'pca')
+```
+
+```{r single-heatmap}
+DimHeatmap(pbmc_subset, dims = 1, cells = 500, balanced = TRUE)
+```
+
+```{r multi-heatmap, fig.height=15, fig.width=9}
+DimHeatmap(pbmc_subset, dims = 1:15, cells = 500, balanced = TRUE)
+```
+
+
+```{r jackstraw, fig.height=6, fig.width=10}
+# NOTE: This process can take a long time for big datasets, comment out for expediency. More approximate techniques such as those implemented in ElbowPlot() can be used to reduce computation time
+pbmc_subset <- JackStraw(pbmc_subset, num.replicate = 100)
+pbmc_subset <- ScoreJackStraw(pbmc_subset, dims = 1:20) #thresolding
+```
+
+```{r jsplots, fig.height=6, fig.width=10}
+JackStrawPlot(pbmc_subset, dims = 1:20)
+```
+
+```{r elbow_plot, fig.height=6, fig.width=10}
+ElbowPlot(pbmc_subset)
+```
+
+# Cluster the cells
+
+
+```{r cluster, fig.height=5, fig.width=7}
+help("FindClusters")
+pbmc_subset <- FindNeighbors(pbmc_subset, dims = 1:10)
+pbmc_subset <- FindClusters(pbmc_subset, resolution = 0.5)
+
+# Look at cluster IDs of the first 5 cells
+head(Idents(pbmc_subset), 5)
+head(pbmc_subset$seurat_clusters)
+
+```
+
+***
+
+# Run non-linear dimensional reduction (tSNE)
+
+Seurat offers several non-linear dimensional reduction techniques, such as tSNE and UMAP, to visualize and explore these datasets. The goal of these algorithms is to learn the underlying manifold of the data in order to place similar cells together in low-dimensional space. Cells within the graph-based clusters determined above should co-localize on these dimension reduction plots. As input to the UMAP and tSNE, we suggest using the same PCs as input to the clustering analysis.
+
+```{r tsne, fig.height=5, fig.width=7}
+
+pbmc_subset <- RunTSNE(pbmc_subset, dims = 1:10)
+```
+
+```{r tsneplot, fig.height=5, fig.width=7}
+# note that you can set `label = TRUE` or use the LabelClusters function to help label individual clusters
+DimPlot(pbmc_subset, reduction = 'tsne')
+```
+
+
+# Homework Problem 2
+Create a hierachical clustering by applying K-means clustering to cells defined by each of 10 cluster. Try to find a suitable number of clusters (k) for each sub-population.
+
+Present
+
+* overall t-SNE visualization with all clusters -- make sure that hierarchy (group) is visualized. 
+* visualize t-SNE for each of 10 clusters, with their sub-clusters.
+
+For example, Zheng et al. 2017
+>  To identify subpopulations within the myeloid population, we further applied k-means clustering on the first 50 PCs of cluster 9 cells
+
+
+```{r saveobject, eval=FALSE}
+library(ggplot2)
+
+pbmc_subset$main_cluster <- as.factor(pbmc_subset$seurat_clusters)
+
+kmeans_result <- kmeans(Embeddings(pbmc_subset, "tsne"), centers = 10)  # K-means na danych t-SNE
+pbmc_subset$main_kmeans_cluster <- as.character(pbmc_subset$main_kmeans_cluster)
+
+
+pbmc_subset@meta.data$sub_kmeans_cluster <- NA  
+colnames(pbmc_subset@meta.data)
+ncol(pbmc_subset)
+sub_labels_all <- rep(NA, ncol(pbmc_subset))
+names(sub_labels_all) <- colnames(pbmc_subset)
+
+for (cluster_id in 1:10) {
+  cluster_cells <- WhichCells(pbmc_subset, expression = main_kmeans_cluster == cluster_id)
+
+  sub_pbmc <- subset(pbmc_subset, cells = cluster_cells)
+  sub_pbmc <- FindVariableFeatures(sub_pbmc)
+  sub_pbmc <- RunPCA(sub_pbmc, features = VariableFeatures(sub_pbmc))
+  sub_pbmc <- RunTSNE(sub_pbmc, dims = 1:10)
+  
+  tsne_embeddings <- Embeddings(sub_pbmc, "tsne")
+  
+  #candidate_k <- 1:10
+  #wss <- sapply(candidate_k, function(k) {
+    kmeans_result <- kmeans(tsne_embeddings, centers = k)
+    kmeans_result$tot.withinss
+  })
+  
+  #plot(candidate_k, wss, type = "b", pch = 19, frame = FALSE,
+       xlab = "k", ylab = "WSS",
+       main = paste("Elbow Plot for cluster", cluster_id))
+  
+  opt_k <- 3
+  sub_kmeans_result <- kmeans(tsne_embeddings, centers = opt_k)
+  sub_labels <- paste0(cluster_id, ".", sub_kmeans_result$cluster)
+  cat("Liczba sub_labels:", length(sub_labels), "\n\n")
+
+  sub_labels_all[cluster_cells] <- sub_labels
+}
+
+pbmc_subset <- AddMetaData(pbmc_subset, metadata = sub_labels_all, col.name = "sub_kmeans_cluster")
+
+sub_labels_all
+
+DimPlot(pbmc_subset, reduction = "tsne", group.by = "main_kmeans_cluster", label = TRUE) + 
+  ggtitle("t-SNE for all clusters")
+
+cluster_ids <- unique(pbmc_subset$main_kmeans_cluster)
+
+for (cluster_id in cluster_ids) {
+  cluster_cells <- colnames(pbmc_subset)[pbmc_subset$main_kmeans_cluster == cluster_id]
+  sub_pbmc <- subset(pbmc_subset, cells = cluster_cells)
+  
+  p <- DimPlot(sub_pbmc, reduction = "tsne", group.by = "sub_kmeans_cluster", label = TRUE) + 
+    ggtitle(paste("t-SNE for cluster", cluster_id, "with sub-clusters"))
+  
+  print(p)
+}
+
+
+tsne_data <- as.data.frame(Embeddings(pbmc_subset, "tsne"))
+tsne_data$main_cluster <- pbmc_subset$main_kmeans_cluster
+tsne_data$sub_cluster <- pbmc_subset$sub_kmeans_cluster
+
+library(ggrepel)
+cluster_labels <- tsne_data %>%
+  group_by(sub_cluster) %>%
+  summarise(
+    tSNE_1 = mean(tSNE_1),
+    tSNE_2 = mean(tSNE_2)
+  )
+ggplot(tsne_data, aes(x = tSNE_1, y = tSNE_2, color = sub_cluster)) +
+  geom_point(size = 0.7, alpha = 0.7) +
+  geom_text_repel(data = cluster_labels, aes(label = sub_cluster), color = "black", size = 4) +
+  theme(legend.position = "none") +
+  ggtitle("t-SNE: clusters with sub_clusters")
+```
+
+
+
+
